@@ -53,9 +53,12 @@ macro union(ex)
         error("duplicate field name")
     end
     types = last.(members)
+    typesex = Expr(:tuple, map(types) do t
+        t |> esc
+    end...)
     modulesym(x::Symbol) = Expr(:., Symbol(@__MODULE__) |> esc, QuoteNode(x))
     quote
-        maxsize = maximum(($(types...),)) do t
+        maxsize = maximum($typesex) do t
             isbitstype(t) || error("not bits type: $t")
             sizeof(t)
         end * 8
@@ -63,7 +66,7 @@ macro union(ex)
         $(modulesym(:unionfields))(::Type{$(T |> esc)}) = $membersex
         $(T |> esc)($(:x |> esc)) = unionof($(T |> esc), $(:x |> esc))
         $(T |> esc)
-    end |> rmlines
+    end
 end
 
 export @union
