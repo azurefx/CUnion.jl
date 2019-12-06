@@ -21,26 +21,52 @@ function Base.getproperty(u::T, name::Symbol) where T <: AbstractUnion
     i = findfirst(((n, t),)->n == name, fields)
     if !isnothing(i)
         ft = fields[i].second
+        isprimitivetype(ft) && sizeof(ft) == sizeof(T) && return reinterpret(ft, u)
         return reinterpret_cast(ft, u)
     end
     getfield(u, name)
 end
 
-function unionof(::Type{T}, x) where T <: AbstractUnion
-    types = tuple(unique(last.(unionfields(T)))...)
-    ret = findfirst(t->x isa t, types)
+function unionof(::Type{U}, x::T) where {U <: AbstractUnion,T}
+    types = tuple(unique(last.(unionfields(U)))...)
+    ret = findfirst(t->T == t, types)
     if isnothing(ret)
         error("$(typeof(x)) does not match any types of fields: $types")
     end
-    reinterpret(T, x)
+    if isprimitivetype(T) && sizeof(T) == sizeof(U)
+        reinterpret(U, x)
+    else
+        reinterpret_cast(U, x)
+    end
+end
+
+walkctx(x, inner, outer, ctx) = outer(x, ctx)
+walkctx(x::Expr, inner, outer, ctx) = outer(Expr(x.head, map(inner, x.args)...), ctx)
+postwalkctx(f, x, ctx) = walkctx(x, x->postwalkctx(f, x, isexpr(x, :struct) ? "$ctx#$(x.args[2])" : ctx), f, ctx)
+
+function structflatten(lines, basety)
+    defs = []
+    result = postwalkctx(lines, "#$basety") do ex, ctx
+        if @capture(ex,struct fname_Symbol lines__ end)
+            fty = Symbol(ctx)
+            def = Expr(:struct, false, fty, Expr(:block, lines...))
+            push!(defs, def)
+            :($fname::$fty)
+        else
+            ex
+        end
+    end
+    return (Expr(:block, defs...) |> MacroTools.flatten, result)
 end
 
 macro union(ex)
     @capture(ex,
     struct T_Symbol
-        lines__
+        rawbody_
     end
     ) || error("expected a struct definition without parameters: $ex")
+    (defs, body) = structflatten(rawbody, T)
+    @capture(body,lines__)
     members = map(lines) do line
         @capture(line,name_::type_) || error("expected a typed field definition: $line")
         (name, type)
@@ -58,6 +84,7 @@ macro union(ex)
     end...)
     modulesym(x::Symbol) = Expr(:., Symbol(@__MODULE__) |> esc, QuoteNode(x))
     quote
+        $(defs |> esc)
         maxsize = maximum($typesex) do t
             isbitstype(t) || error("not bits type: $t")
             sizeof(t)
@@ -65,8 +92,8 @@ macro union(ex)
         primitive type $T <: AbstractUnion maxsize end
         $(modulesym(:unionfields))(::Type{$(T |> esc)}) = $membersex
         $(T |> esc)($(:x |> esc)) = unionof($(T |> esc), $(:x |> esc))
-        $(T |> esc)
-    end
+        nothing
+    end |> x->MacroTools.postwalk(unblock ∘ rmlines, x)
 end
 
 export @union
