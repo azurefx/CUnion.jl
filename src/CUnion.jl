@@ -8,12 +8,62 @@ function unionfields end
 
 export AbstractUnion,unionfields
 
+@generated function ofsize_gen(::Type{T}) where T
+    s = sizeof(T)
+    return if s == 1
+        UInt8
+    elseif s == 2
+        UInt16
+    elseif s == 4
+        UInt32
+    elseif s == 8
+        UInt64
+    elseif s == 16
+        UInt128
+    else
+        Nothing
+    end
+end
+
+function ofsize(::Type{T}) where T
+    ty = ofsize_gen(T)
+    if ty !== Nothing
+        return ty
+    end
+    s = sizeof(T)
+    sym = gensym("Primitive$(8s)")
+    ex = quote
+        primitive type $sym $(8s) end
+        ofsize(::Type{$T}) = $sym
+        $sym
+    end
+    eval(ex)
+end
+
 function reinterpret_cast(::Type{T}, x) where T
-    s = max(sizeof(x), sizeof(T))
-    a = Vector{UInt8}(undef, s)
-    p = pointer(a)
-    unsafe_store!(Ptr{typeof(x)}(p), x)
-    unsafe_load(Ptr{T}(p))
+    xbits = if isprimitivetype(typeof(x))
+        reinterpret(ofsize(typeof(x)), x)
+    else
+        ref = Ref(x)
+        GC.@preserve begin
+            unsafe_load(Ptr{ofsize(typeof(x))}(pointer_from_objref(ref)))
+        end
+    end
+    tbits = if sizeof(T) < sizeof(xbits)
+        reinterpret(T, Core.Intrinsics.trunc_int(ofsize(T), xbits))
+    elseif sizeof(T) > sizeof(xbits)
+        reinterpret(T, Core.Intrinsics.zext_int(ofsize(T), xbits))
+    else
+        xbits
+    end
+    return if isprimitivetype(T)
+        reinterpret(T, tbits)
+    else
+        ref = Ref(tbits)
+        GC.@preserve begin
+            unsafe_load(Ptr{T}(pointer_from_objref(ref)))
+        end
+    end
 end
 
 function Base.getproperty(u::T, name::Symbol) where T <: AbstractUnion
@@ -21,7 +71,6 @@ function Base.getproperty(u::T, name::Symbol) where T <: AbstractUnion
     i = findfirst(((n, t),)->n == name, fields)
     if !isnothing(i)
         ft = fields[i].second
-        isprimitivetype(ft) && sizeof(ft) == sizeof(T) && return reinterpret(ft, u)
         return reinterpret_cast(ft, u)
     end
     getfield(u, name)
@@ -33,11 +82,7 @@ function unionof(::Type{U}, x::T) where {U <: AbstractUnion,T}
     if isnothing(ret)
         error("$(typeof(x)) does not match any types of fields: $types")
     end
-    if isprimitivetype(T) && sizeof(T) == sizeof(U)
-        reinterpret(U, x)
-    else
-        reinterpret_cast(U, x)
-    end
+    reinterpret_cast(U, x)
 end
 
 walkctx(x, inner, outer, ctx) = outer(x, ctx)
